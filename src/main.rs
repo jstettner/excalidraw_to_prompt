@@ -1,3 +1,4 @@
+mod hierarchy;
 mod mermaid;
 mod types;
 

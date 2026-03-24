@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
+use crate::hierarchy::{build_hierarchy, HierarchyNode};
 use crate::types::{ElementData, ExcalidrawElement};
 
 pub fn generate_mermaid(elements: &[&ExcalidrawElement]) -> String {
@@ -63,19 +64,11 @@ pub fn generate_mermaid(elements: &[&ExcalidrawElement]) -> String {
     let mut out = String::new();
     writeln!(out, "flowchart TD").unwrap();
 
-    // Emit nodes (rectangles)
-    for el in elements {
-        if let ElementData::Rectangle = &el.element_data {
-            let label = node_labels.get(el.id.as_str()).copied().unwrap_or("?");
-            let readable_id = &id_map[el.id.as_str()];
-            writeln!(
-                out,
-                "    {}[\"{}\"]",
-                readable_id,
-                escape_mermaid_text(label)
-            )
-            .unwrap();
-        }
+    // Build hierarchy and emit nodes with subgraph support
+    let hierarchy = build_hierarchy(elements);
+    let mut sg_counter: usize = 0;
+    for node in &hierarchy.roots {
+        emit_node(&mut out, node, &id_map, &node_labels, 1, &mut sg_counter);
     }
 
     // Emit edges (arrows and lines)
@@ -121,6 +114,42 @@ fn emit_edge(out: &mut String, id: &str, src: Option<&String>, dst: Option<&Stri
         }
     }
     .unwrap();
+}
+
+fn emit_node(
+    out: &mut String,
+    node: &HierarchyNode,
+    id_map: &HashMap<&str, String>,
+    node_labels: &HashMap<&str, &str>,
+    depth: usize,
+    sg_counter: &mut usize,
+) {
+    let indent = "    ".repeat(depth);
+    let readable_id = &id_map[node.element_id];
+
+    if node.children.is_empty() {
+        // Leaf node — regular Mermaid node
+        let label = node_labels
+            .get(node.element_id)
+            .copied()
+            .unwrap_or("?");
+        writeln!(out, "{}{}[\"{}\"]", indent, readable_id, escape_mermaid_text(label)).unwrap();
+    } else {
+        // Container node — subgraph
+        let label = node_labels.get(node.element_id).copied();
+        let (sg_id, sg_label) = match label {
+            Some(text) => (readable_id.clone(), format!("\"{}\"", escape_mermaid_text(text))),
+            None => {
+                *sg_counter += 1;
+                (format!("sg_{}", sg_counter), "\" \"".to_string())
+            }
+        };
+        writeln!(out, "{}subgraph {}[{}]", indent, sg_id, sg_label).unwrap();
+        for child in &node.children {
+            emit_node(out, child, id_map, node_labels, depth + 1, sg_counter);
+        }
+        writeln!(out, "{}end", indent).unwrap();
+    }
 }
 
 fn label_to_id(label: &str) -> String {
@@ -387,5 +416,251 @@ mod tests {
 
         assert!(output.contains("process[\"Process\"]"), "output was: {}", output);
         assert!(output.contains("process_2[\"Process\"]"), "output was: {}", output);
+    }
+
+    #[test]
+    fn test_subgraph_named_container() {
+        let elements = vec![
+            // Outer container rect
+            ExcalidrawElement {
+                id: "outer".into(),
+                x: 0.0, y: 0.0, width: 500.0, height: 400.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Rectangle,
+            },
+            // Label for outer container
+            ExcalidrawElement {
+                id: "outer_text".into(),
+                x: 10.0, y: 10.0, width: 100.0, height: 20.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Text {
+                    text: "My Group".into(),
+                    original_text: "My Group".into(),
+                    container_id: Some("outer".into()),
+                },
+            },
+            // Inner leaf rect
+            ExcalidrawElement {
+                id: "inner".into(),
+                x: 50.0, y: 50.0, width: 100.0, height: 80.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Rectangle,
+            },
+            // Label for inner rect
+            ExcalidrawElement {
+                id: "inner_text".into(),
+                x: 60.0, y: 60.0, width: 50.0, height: 20.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Text {
+                    text: "Child".into(),
+                    original_text: "Child".into(),
+                    container_id: Some("inner".into()),
+                },
+            },
+        ];
+
+        let refs: Vec<&ExcalidrawElement> = elements.iter().collect();
+        let output = generate_mermaid(&refs);
+
+        assert!(output.contains("subgraph my_group[\"My Group\"]"), "output was:\n{}", output);
+        assert!(output.contains("child[\"Child\"]"), "output was:\n{}", output);
+        assert!(output.contains("end"), "output was:\n{}", output);
+    }
+
+    #[test]
+    fn test_subgraph_unnamed_container() {
+        let elements = vec![
+            // Unnamed outer container
+            ExcalidrawElement {
+                id: "outer".into(),
+                x: 0.0, y: 0.0, width: 500.0, height: 400.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Rectangle,
+            },
+            // Inner leaf rect
+            ExcalidrawElement {
+                id: "inner".into(),
+                x: 50.0, y: 50.0, width: 100.0, height: 80.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Rectangle,
+            },
+            ExcalidrawElement {
+                id: "inner_text".into(),
+                x: 60.0, y: 60.0, width: 50.0, height: 20.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Text {
+                    text: "Leaf".into(),
+                    original_text: "Leaf".into(),
+                    container_id: Some("inner".into()),
+                },
+            },
+        ];
+
+        let refs: Vec<&ExcalidrawElement> = elements.iter().collect();
+        let output = generate_mermaid(&refs);
+
+        assert!(output.contains("subgraph sg_1[\" \"]"), "output was:\n{}", output);
+        assert!(output.contains("leaf[\"Leaf\"]"), "output was:\n{}", output);
+    }
+
+    #[test]
+    fn test_nested_subgraphs() {
+        let elements = vec![
+            ExcalidrawElement {
+                id: "big".into(),
+                x: 0.0, y: 0.0, width: 600.0, height: 500.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Rectangle,
+            },
+            ExcalidrawElement {
+                id: "big_text".into(),
+                x: 10.0, y: 10.0, width: 80.0, height: 20.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Text {
+                    text: "Outer".into(),
+                    original_text: "Outer".into(),
+                    container_id: Some("big".into()),
+                },
+            },
+            ExcalidrawElement {
+                id: "mid".into(),
+                x: 50.0, y: 50.0, width: 300.0, height: 300.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Rectangle,
+            },
+            ExcalidrawElement {
+                id: "mid_text".into(),
+                x: 60.0, y: 60.0, width: 80.0, height: 20.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Text {
+                    text: "Middle".into(),
+                    original_text: "Middle".into(),
+                    container_id: Some("mid".into()),
+                },
+            },
+            ExcalidrawElement {
+                id: "leaf".into(),
+                x: 100.0, y: 100.0, width: 80.0, height: 60.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Rectangle,
+            },
+            ExcalidrawElement {
+                id: "leaf_text".into(),
+                x: 110.0, y: 110.0, width: 40.0, height: 20.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Text {
+                    text: "Inner".into(),
+                    original_text: "Inner".into(),
+                    container_id: Some("leaf".into()),
+                },
+            },
+        ];
+
+        let refs: Vec<&ExcalidrawElement> = elements.iter().collect();
+        let output = generate_mermaid(&refs);
+
+        assert!(output.contains("subgraph outer[\"Outer\"]"), "output was:\n{}", output);
+        assert!(output.contains("subgraph middle[\"Middle\"]"), "output was:\n{}", output);
+        assert!(output.contains("inner[\"Inner\"]"), "output was:\n{}", output);
+        // Should not contain inner as a subgraph
+        assert!(!output.contains("subgraph inner"), "output was:\n{}", output);
+    }
+
+    #[test]
+    fn test_cross_subgraph_edge() {
+        use crate::types::Binding;
+
+        let elements = vec![
+            // Container
+            ExcalidrawElement {
+                id: "container".into(),
+                x: 0.0, y: 0.0, width: 500.0, height: 400.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Rectangle,
+            },
+            ExcalidrawElement {
+                id: "container_text".into(),
+                x: 10.0, y: 10.0, width: 80.0, height: 20.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Text {
+                    text: "Group".into(),
+                    original_text: "Group".into(),
+                    container_id: Some("container".into()),
+                },
+            },
+            // Node inside container
+            ExcalidrawElement {
+                id: "n1".into(),
+                x: 50.0, y: 50.0, width: 100.0, height: 80.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Rectangle,
+            },
+            ExcalidrawElement {
+                id: "n1_text".into(),
+                x: 60.0, y: 60.0, width: 50.0, height: 20.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Text {
+                    text: "A".into(),
+                    original_text: "A".into(),
+                    container_id: Some("n1".into()),
+                },
+            },
+            // Node outside container
+            ExcalidrawElement {
+                id: "n2".into(),
+                x: 600.0, y: 50.0, width: 100.0, height: 80.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Rectangle,
+            },
+            ExcalidrawElement {
+                id: "n2_text".into(),
+                x: 610.0, y: 60.0, width: 50.0, height: 20.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Text {
+                    text: "B".into(),
+                    original_text: "B".into(),
+                    container_id: Some("n2".into()),
+                },
+            },
+            // Arrow from n1 to n2 (cross-subgraph)
+            ExcalidrawElement {
+                id: "arrow1".into(),
+                x: 150.0, y: 90.0, width: 450.0, height: 0.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Arrow {
+                    points: vec![[0.0, 0.0], [450.0, 0.0]],
+                    start_binding: Some(Binding { element_id: "n1".into() }),
+                    end_binding: Some(Binding { element_id: "n2".into() }),
+                },
+            },
+        ];
+
+        let refs: Vec<&ExcalidrawElement> = elements.iter().collect();
+        let output = generate_mermaid(&refs);
+
+        assert!(output.contains("subgraph group[\"Group\"]"), "output was:\n{}", output);
+        assert!(output.contains("a[\"A\"]"), "output was:\n{}", output);
+        assert!(output.contains("b[\"B\"]"), "output was:\n{}", output);
+        assert!(output.contains("a --> b"), "output was:\n{}", output);
     }
 }
