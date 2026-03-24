@@ -1,8 +1,6 @@
 # excalidraw_to_prompt
 
-A CLI tool that converts [Excalidraw](https://excalidraw.com/) diagrams into LLM-friendly Mermaid flowcharts, so you can sketch an architecture and drop it straight into a prompt.
-
-Excalidraw's JSON export is verbose and full of rendering metadata that's useless to an LLM. This tool distills it down to a clean Mermaid `flowchart TD` representation that language models understand natively.
+A CLI that converts [Excalidraw](https://excalidraw.com/) diagrams into LLM-friendly flowcharts. Excalidraw's JSON export is verbose and full of rendering metadata that's useless to an LLM. This tool distills it down to a clean Mermaid `flowchart TD` representation that language models understand natively.
 
 ## Features
 
