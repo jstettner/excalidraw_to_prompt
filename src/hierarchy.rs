@@ -90,31 +90,42 @@ pub fn build_hierarchy<'a>(elements: &[&'a ExcalidrawElement]) -> Hierarchy<'a> 
         children_map.entry(parent_id).or_default().push(child_id);
     }
 
-    // Build tree recursively
+    // Build tree recursively, sorting children by Y position
     fn build_node<'a>(
         id: &'a str,
         children_map: &HashMap<&str, Vec<&'a str>>,
+        rect_map: &HashMap<&str, Rect>,
     ) -> HierarchyNode<'a> {
-        let children = children_map
+        let mut children: Vec<HierarchyNode<'a>> = children_map
             .get(id)
             .map(|kids| {
                 kids.iter()
-                    .map(|kid| build_node(kid, children_map))
+                    .map(|kid| build_node(kid, children_map, rect_map))
                     .collect()
             })
             .unwrap_or_default();
+        children.sort_by(|a, b| {
+            let ay = rect_map.get(a.element_id).map_or(0.0, |r| r.top);
+            let by = rect_map.get(b.element_id).map_or(0.0, |r| r.top);
+            ay.partial_cmp(&by).unwrap_or(std::cmp::Ordering::Equal)
+        });
         HierarchyNode {
             element_id: id,
             children,
         }
     }
 
-    // Roots = rects with no parent
-    let roots: Vec<HierarchyNode<'a>> = rects
+    // Roots = rects with no parent, sorted by Y position
+    let mut roots: Vec<HierarchyNode<'a>> = rects
         .iter()
         .filter(|r| !parent_map.contains_key(r.id.as_str()))
-        .map(|r| build_node(r.id.as_str(), &children_map))
+        .map(|r| build_node(r.id.as_str(), &children_map, &rect_map))
         .collect();
+    roots.sort_by(|a, b| {
+        let ay = rect_map.get(a.element_id).map_or(0.0, |r| r.top);
+        let by = rect_map.get(b.element_id).map_or(0.0, |r| r.top);
+        ay.partial_cmp(&by).unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     Hierarchy { roots }
 }
@@ -214,5 +225,36 @@ mod tests {
         let h = build_hierarchy(&elements);
         assert_eq!(h.roots.len(), 1);
         assert_eq!(h.roots[0].children.len(), 3);
+    }
+
+    #[test]
+    fn test_children_sorted_by_y() {
+        let parent = make_rect("parent", 0.0, 0.0, 500.0, 500.0);
+        // Insert children in wrong order
+        let bottom = make_rect("bottom", 10.0, 300.0, 80.0, 60.0);
+        let top = make_rect("top", 10.0, 50.0, 80.0, 60.0);
+        let mid = make_rect("mid", 10.0, 170.0, 80.0, 60.0);
+        let elements: Vec<&ExcalidrawElement> = vec![&parent, &bottom, &top, &mid];
+        let h = build_hierarchy(&elements);
+        assert_eq!(h.roots.len(), 1);
+        let kids = &h.roots[0].children;
+        assert_eq!(kids.len(), 3);
+        assert_eq!(kids[0].element_id, "top");
+        assert_eq!(kids[1].element_id, "mid");
+        assert_eq!(kids[2].element_id, "bottom");
+    }
+
+    #[test]
+    fn test_roots_sorted_by_y() {
+        let r_bottom = make_rect("bottom", 0.0, 300.0, 100.0, 50.0);
+        let r_top = make_rect("top", 0.0, 10.0, 100.0, 50.0);
+        let r_mid = make_rect("mid", 0.0, 150.0, 100.0, 50.0);
+        // Provide in reverse order
+        let elements: Vec<&ExcalidrawElement> = vec![&r_bottom, &r_mid, &r_top];
+        let h = build_hierarchy(&elements);
+        assert_eq!(h.roots.len(), 3);
+        assert_eq!(h.roots[0].element_id, "top");
+        assert_eq!(h.roots[1].element_id, "mid");
+        assert_eq!(h.roots[2].element_id, "bottom");
     }
 }
