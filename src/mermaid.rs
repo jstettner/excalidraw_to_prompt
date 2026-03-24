@@ -24,7 +24,8 @@ pub fn generate_mermaid(elements: &[&ExcalidrawElement]) -> String {
 
     // Build excalidraw_id -> readable_id mapping
     let mut id_map: HashMap<&str, String> = HashMap::new();
-    let mut used_ids: HashMap<String, usize> = HashMap::new();
+    let mut used_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let initial_word_count: usize = 3;
     for el in elements {
         let label = match &el.element_data {
             ElementData::Rectangle => node_labels.get(el.id.as_str()).copied().unwrap_or("?"),
@@ -36,15 +37,36 @@ pub fn generate_mermaid(elements: &[&ExcalidrawElement]) -> String {
             } => text.as_str(),
             _ => continue,
         };
-        let base = label_to_id(label);
-        let count = used_ids.entry(base.clone()).or_insert(0);
-        *count += 1;
-        let readable = if *count == 1 {
-            base
-        } else {
-            format!("{}_{}", base, count)
-        };
-        id_map.insert(el.id.as_str(), readable);
+        let words = label_to_words(label);
+        let take = initial_word_count.min(words.len());
+        let mut candidate = words_to_id(&words[..take]);
+
+        // Smart deduplication: extend with more words before numeric suffix
+        if used_ids.contains(&candidate) {
+            let mut n = take;
+            while n < words.len() {
+                n += 1;
+                candidate = words_to_id(&words[..n]);
+                if !used_ids.contains(&candidate) {
+                    break;
+                }
+            }
+            // If still colliding after all words exhausted, add numeric suffix
+            if used_ids.contains(&candidate) {
+                let base = candidate.clone();
+                let mut counter = 2;
+                loop {
+                    candidate = format!("{}{}", base, counter);
+                    if !used_ids.contains(&candidate) {
+                        break;
+                    }
+                    counter += 1;
+                }
+            }
+        }
+
+        used_ids.insert(candidate.clone());
+        id_map.insert(el.id.as_str(), candidate);
     }
 
     // Build edge labels: arrow_id -> text, and track which text elements are edge labels
@@ -256,39 +278,32 @@ fn emit_node(
     }
 }
 
-fn label_to_id(label: &str) -> String {
-    let mut out = String::new();
-    for c in label.chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c.to_ascii_lowercase());
-        } else {
-            out.push('_');
-        }
-    }
-    // Collapse consecutive underscores
-    let mut collapsed = String::new();
-    let mut prev_underscore = false;
-    for c in out.chars() {
-        if c == '_' {
-            if !prev_underscore {
-                collapsed.push('_');
-            }
-            prev_underscore = true;
-        } else {
-            collapsed.push(c);
-            prev_underscore = false;
-        }
-    }
-    // Trim trailing underscores
-    let trimmed = collapsed.trim_end_matches('_');
-    if trimmed.is_empty() {
+/// Split a label into lowercase alphanumeric words.
+fn label_to_words(label: &str) -> Vec<String> {
+    label
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase())
+        .collect()
+}
+
+/// Build a camelCase ID from a slice of words.
+fn words_to_id(words: &[String]) -> String {
+    if words.is_empty() {
         return "node".to_string();
     }
-    // Prepend 'n' if starts with digit
-    if trimmed.starts_with(|c: char| c.is_ascii_digit()) {
-        format!("n{}", trimmed)
+    let mut id = words[0].clone();
+    for w in &words[1..] {
+        let mut chars = w.chars();
+        if let Some(first) = chars.next() {
+            id.extend(first.to_uppercase());
+            id.push_str(chars.as_str());
+        }
+    }
+    if id.starts_with(|c: char| c.is_ascii_digit()) {
+        format!("n{}", id)
     } else {
-        trimmed.to_string()
+        id
     }
 }
 
@@ -317,14 +332,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_label_to_id() {
-        assert_eq!(label_to_id("Start"), "start");
-        assert_eq!(label_to_id("Hello World"), "hello_world");
-        assert_eq!(label_to_id("123abc"), "n123abc");
-        assert_eq!(label_to_id("a--b..c"), "a_b_c");
-        assert_eq!(label_to_id("!!!"), "node");
-        assert_eq!(label_to_id(""), "node");
-        assert_eq!(label_to_id("Process Data!"), "process_data");
+    fn test_label_to_words() {
+        assert_eq!(label_to_words("Start"), vec!["start"]);
+        assert_eq!(label_to_words("Hello World"), vec!["hello", "world"]);
+        assert_eq!(label_to_words("123abc"), vec!["123abc"]);
+        assert_eq!(label_to_words("a--b..c"), vec!["a", "b", "c"]);
+        assert!(label_to_words("!!!").is_empty());
+        assert!(label_to_words("").is_empty());
+        assert_eq!(label_to_words("Process Data!"), vec!["process", "data"]);
+    }
+
+    #[test]
+    fn test_words_to_id() {
+        assert_eq!(words_to_id(&[]), "node");
+        assert_eq!(words_to_id(&["start".into()]), "start");
+        assert_eq!(words_to_id(&["hello".into(), "world".into()]), "helloWorld");
+        assert_eq!(words_to_id(&["123abc".into()]), "n123abc");
+        assert_eq!(
+            words_to_id(&["customer".into(), "association".into(), "happens".into()]),
+            "customerAssociationHappens"
+        );
+    }
+
+    #[test]
+    fn test_long_label_truncated_to_3_words() {
+        let words = label_to_words("customer association happens by participant emails");
+        assert_eq!(words.len(), 6);
+        // First 3 words produce a short ID
+        assert_eq!(words_to_id(&words[..3]), "customerAssociationHappens");
     }
 
     #[test]
@@ -519,7 +554,7 @@ mod tests {
         let output = generate_mermaid(&refs);
 
         assert!(output.contains("process[\"Process\"]"), "output was: {}", output);
-        assert!(output.contains("process_2[\"Process\"]"), "output was: {}", output);
+        assert!(output.contains("process2[\"Process\"]"), "output was: {}", output);
     }
 
     #[test]
@@ -570,7 +605,7 @@ mod tests {
         let refs: Vec<&ExcalidrawElement> = elements.iter().collect();
         let output = generate_mermaid(&refs);
 
-        assert!(output.contains("subgraph my_group[\"My Group\"]"), "output was:\n{}", output);
+        assert!(output.contains("subgraph myGroup[\"My Group\"]"), "output was:\n{}", output);
         assert!(output.contains("child[\"Child\"]"), "output was:\n{}", output);
         assert!(output.contains("end"), "output was:\n{}", output);
     }
@@ -959,6 +994,62 @@ mod tests {
 
         // Line should remain dangling — no proximity resolution
         assert!(output.contains("dangling"), "line should stay dangling, output was:\n{}", output);
+    }
+
+    #[test]
+    fn test_smart_deduplication() {
+        use crate::types::BoundElement;
+
+        // Two nodes whose first 3 words collide: "good morning everyone" vs "good morning friends"
+        // They should get distinct IDs without numeric suffixes.
+        let elements = vec![
+            ExcalidrawElement {
+                id: "r1".into(),
+                x: 0.0, y: 0.0, width: 100.0, height: 50.0,
+                is_deleted: false,
+                bound_elements: Some(vec![BoundElement { id: "t1".into(), kind: "text".into() }]),
+                element_data: ElementData::Rectangle,
+            },
+            ExcalidrawElement {
+                id: "r2".into(),
+                x: 200.0, y: 0.0, width: 100.0, height: 50.0,
+                is_deleted: false,
+                bound_elements: Some(vec![BoundElement { id: "t2".into(), kind: "text".into() }]),
+                element_data: ElementData::Rectangle,
+            },
+            ExcalidrawElement {
+                id: "t1".into(),
+                x: 0.0, y: 0.0, width: 50.0, height: 20.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Text {
+                    text: "good morning everyone today".into(),
+                    original_text: "good morning everyone today".into(),
+                    container_id: Some("r1".into()),
+                },
+            },
+            ExcalidrawElement {
+                id: "t2".into(),
+                x: 200.0, y: 0.0, width: 50.0, height: 20.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Text {
+                    text: "good morning friends forever".into(),
+                    original_text: "good morning friends forever".into(),
+                    container_id: Some("r2".into()),
+                },
+            },
+        ];
+
+        let refs: Vec<&ExcalidrawElement> = elements.iter().collect();
+        let output = generate_mermaid(&refs);
+
+        // First node gets 3 words: goodMorningEveryone
+        assert!(output.contains("goodMorningEveryone["), "output was: {}", output);
+        // Second node: "goodMorning" collides at 2 words, but at 3 words "goodMorningFriends" is unique
+        assert!(output.contains("goodMorningFriends["), "output was: {}", output);
+        // No numeric suffixes
+        assert!(!output.contains("goodMorning2"), "output was: {}", output);
     }
 
     #[test]
