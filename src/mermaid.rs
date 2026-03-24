@@ -26,22 +26,30 @@ pub fn generate_mermaid(elements: &[&ExcalidrawElement]) -> String {
     let mut id_map: HashMap<&str, String> = HashMap::new();
     let mut used_ids: HashMap<String, usize> = HashMap::new();
     for el in elements {
-        if let ElementData::Rectangle = &el.element_data {
-            let label = node_labels.get(el.id.as_str()).copied().unwrap_or("?");
-            let base = label_to_id(label);
-            let count = used_ids.entry(base.clone()).or_insert(0);
-            *count += 1;
-            let readable = if *count == 1 {
-                base
-            } else {
-                format!("{}_{}", base, count)
-            };
-            id_map.insert(el.id.as_str(), readable);
-        }
+        let label = match &el.element_data {
+            ElementData::Rectangle => node_labels.get(el.id.as_str()).copied().unwrap_or("?"),
+            // Free-standing text (no container) can be an arrow endpoint
+            ElementData::Text {
+                text,
+                container_id: None,
+                ..
+            } => text.as_str(),
+            _ => continue,
+        };
+        let base = label_to_id(label);
+        let count = used_ids.entry(base.clone()).or_insert(0);
+        *count += 1;
+        let readable = if *count == 1 {
+            base
+        } else {
+            format!("{}_{}", base, count)
+        };
+        id_map.insert(el.id.as_str(), readable);
     }
 
-    // Build edge labels: arrow_id -> text
+    // Build edge labels: arrow_id -> text, and track which text elements are edge labels
     let mut edge_labels: HashMap<&str, &str> = HashMap::new();
+    let mut edge_label_text_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for el in elements {
         match &el.element_data {
             ElementData::Arrow { .. } | ElementData::Line { .. } => {
@@ -51,6 +59,7 @@ pub fn generate_mermaid(elements: &[&ExcalidrawElement]) -> String {
                             if let Some(text_el) = index.get(b.id.as_str()) {
                                 if let ElementData::Text { text, .. } = &text_el.element_data {
                                     edge_labels.insert(el.id.as_str(), text.as_str());
+                                    edge_label_text_ids.insert(b.id.as_str());
                                 }
                             }
                         }
@@ -69,6 +78,23 @@ pub fn generate_mermaid(elements: &[&ExcalidrawElement]) -> String {
     let mut sg_counter: usize = 0;
     for node in &hierarchy.roots {
         emit_node(&mut out, node, &id_map, &node_labels, 1, &mut sg_counter);
+    }
+
+    // Emit free-standing text elements as nodes (skip edge labels)
+    for el in elements {
+        if let ElementData::Text {
+            text,
+            container_id: None,
+            ..
+        } = &el.element_data
+        {
+            if edge_label_text_ids.contains(el.id.as_str()) {
+                continue;
+            }
+            if let Some(readable_id) = id_map.get(el.id.as_str()) {
+                writeln!(out, "    {}[\"{}\"]", readable_id, escape_mermaid_text(text)).unwrap();
+            }
+        }
     }
 
     // Emit edges (arrows and lines)
