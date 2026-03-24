@@ -103,10 +103,33 @@ pub fn generate_mermaid(elements: &[&ExcalidrawElement]) -> String {
             ElementData::Arrow {
                 start_binding,
                 end_binding,
-                ..
+                points,
             } => {
-                let src = start_binding.as_ref().and_then(|b| id_map.get(b.element_id.as_str()));
-                let dst = end_binding.as_ref().and_then(|b| id_map.get(b.element_id.as_str()));
+                let mut src = start_binding.as_ref().and_then(|b| id_map.get(b.element_id.as_str()));
+                let mut dst = end_binding.as_ref().and_then(|b| id_map.get(b.element_id.as_str()));
+
+                // Proximity fallback for unbound start
+                if src.is_none() {
+                    if let Some(first) = points.first() {
+                        let px = el.x + first[0];
+                        let py = el.y + first[1];
+                        if let Some(nearest_id) = find_nearest_node(px, py, elements, &id_map) {
+                            src = id_map.get(nearest_id);
+                        }
+                    }
+                }
+
+                // Proximity fallback for unbound end
+                if dst.is_none() {
+                    if let Some(last) = points.last() {
+                        let px = el.x + last[0];
+                        let py = el.y + last[1];
+                        if let Some(nearest_id) = find_nearest_node(px, py, elements, &id_map) {
+                            dst = id_map.get(nearest_id);
+                        }
+                    }
+                }
+
                 let label = edge_labels.get(el.id.as_str()).copied();
                 emit_edge(&mut out, &el.id, src, dst, "-->", label);
             }
@@ -125,6 +148,61 @@ pub fn generate_mermaid(elements: &[&ExcalidrawElement]) -> String {
     }
 
     out
+}
+
+const PROXIMITY_THRESHOLD: f64 = 50.0;
+
+/// Compute the distance from point (px, py) to the nearest edge of a rectangle.
+/// Returns 0 if the point is exactly on the border, a positive value if outside,
+/// and a negative-free interior distance (min to any edge) if inside.
+fn dist_to_nearest_edge(px: f64, py: f64, left: f64, top: f64, right: f64, bottom: f64) -> f64 {
+    let dx = (left - px).max(0.0_f64).max(px - right);
+    let dy = (top - py).max(0.0_f64).max(py - bottom);
+    if dx <= 0.0 && dy <= 0.0 {
+        // Point is inside the rectangle: return min distance to any edge
+        (px - left)
+            .min(right - px)
+            .min(py - top)
+            .min(bottom - py)
+    } else {
+        (dx.max(0.0).powi(2) + dy.max(0.0).powi(2)).sqrt()
+    }
+}
+
+/// Find the nearest node element to point (px, py) by distance to its border.
+/// Among candidates within PROXIMITY_THRESHOLD, prefer the one with largest area
+/// (outermost container) to avoid binding to a child rect when aiming at the container.
+fn find_nearest_node<'a>(
+    px: f64,
+    py: f64,
+    elements: &[&'a ExcalidrawElement],
+    id_map: &HashMap<&str, String>,
+) -> Option<&'a str> {
+    let mut best: Option<(&'a str, f64, f64)> = None; // (id, distance, area)
+
+    for el in elements {
+        if !id_map.contains_key(el.id.as_str()) {
+            continue;
+        }
+        let left = el.x;
+        let top = el.y;
+        let right = el.x + el.width;
+        let bottom = el.y + el.height;
+        let dist = dist_to_nearest_edge(px, py, left, top, right, bottom);
+        if dist > PROXIMITY_THRESHOLD {
+            continue;
+        }
+        let area = el.width * el.height;
+        let dominated = match best {
+            Some((_, bd, ba)) => dist < bd || (dist == bd && area > ba),
+            None => true,
+        };
+        if dominated {
+            best = Some((el.id.as_str(), dist, area));
+        }
+    }
+
+    best.map(|(id, _, _)| id)
 }
 
 fn emit_edge(out: &mut String, id: &str, src: Option<&String>, dst: Option<&String>, connector: &str, label: Option<&str>) {
@@ -688,5 +766,211 @@ mod tests {
         assert!(output.contains("a[\"A\"]"), "output was:\n{}", output);
         assert!(output.contains("b[\"B\"]"), "output was:\n{}", output);
         assert!(output.contains("a --> b"), "output was:\n{}", output);
+    }
+
+    #[test]
+    fn test_proximity_fallback_arrow() {
+        // Arrow with unbound start near a free-standing text node should resolve via proximity.
+        // The text node is at (100, 100) with size 80x30.
+        // Arrow starts at absolute position (95, 115) — just 5px to the left of the text border.
+        // Arrow end is bound normally.
+        use crate::types::Binding;
+
+        let elements = vec![
+            ExcalidrawElement {
+                id: "text_node".into(),
+                x: 100.0, y: 100.0, width: 80.0, height: 30.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Text {
+                    text: "Source".into(),
+                    original_text: "Source".into(),
+                    container_id: None,
+                },
+            },
+            ExcalidrawElement {
+                id: "rect_dest".into(),
+                x: 400.0, y: 100.0, width: 100.0, height: 50.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Rectangle,
+            },
+            ExcalidrawElement {
+                id: "rect_dest_text".into(),
+                x: 410.0, y: 110.0, width: 50.0, height: 20.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Text {
+                    text: "Dest".into(),
+                    original_text: "Dest".into(),
+                    container_id: Some("rect_dest".into()),
+                },
+            },
+            ExcalidrawElement {
+                id: "arrow_unbound".into(),
+                // Arrow element position
+                x: 95.0, y: 115.0, width: 355.0, height: 0.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Arrow {
+                    // points[0] = [0,0] => absolute (95, 115), 5px left of text_node
+                    // points[1] = [355,0] => absolute (450, 115), inside rect_dest
+                    points: vec![[0.0, 0.0], [355.0, 0.0]],
+                    start_binding: None, // unbound!
+                    end_binding: Some(Binding { element_id: "rect_dest".into() }),
+                },
+            },
+        ];
+
+        let refs: Vec<&ExcalidrawElement> = elements.iter().collect();
+        let output = generate_mermaid(&refs);
+
+        // Should resolve the unbound start to "source" (the free-standing text)
+        assert!(output.contains("source --> dest"), "expected proximity resolution, output was:\n{}", output);
+        // Should NOT have a dangling comment
+        assert!(!output.contains("dangling"), "should not have dangling binding, output was:\n{}", output);
+    }
+
+    #[test]
+    fn test_proximity_fallback_prefers_largest_area() {
+        // When an arrow endpoint is near both a container and its child,
+        // prefer the container (larger area).
+        use crate::types::Binding;
+
+        let elements = vec![
+            // Large container
+            ExcalidrawElement {
+                id: "container".into(),
+                x: 0.0, y: 0.0, width: 400.0, height: 300.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Rectangle,
+            },
+            ExcalidrawElement {
+                id: "container_text".into(),
+                x: 10.0, y: 10.0, width: 80.0, height: 20.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Text {
+                    text: "Container".into(),
+                    original_text: "Container".into(),
+                    container_id: Some("container".into()),
+                },
+            },
+            // Child rect sitting against left edge of container
+            ExcalidrawElement {
+                id: "child".into(),
+                x: 10.0, y: 50.0, width: 100.0, height: 60.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Rectangle,
+            },
+            ExcalidrawElement {
+                id: "child_text".into(),
+                x: 20.0, y: 60.0, width: 50.0, height: 20.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Text {
+                    text: "Child".into(),
+                    original_text: "Child".into(),
+                    container_id: Some("child".into()),
+                },
+            },
+            // Target outside
+            ExcalidrawElement {
+                id: "target".into(),
+                x: 500.0, y: 100.0, width: 100.0, height: 50.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Rectangle,
+            },
+            ExcalidrawElement {
+                id: "target_text".into(),
+                x: 510.0, y: 110.0, width: 50.0, height: 20.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Text {
+                    text: "Target".into(),
+                    original_text: "Target".into(),
+                    container_id: Some("target".into()),
+                },
+            },
+            // Arrow starting just outside the left edge of both container and child
+            ExcalidrawElement {
+                id: "arrow1".into(),
+                x: -5.0, y: 80.0, width: 555.0, height: 0.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Arrow {
+                    // Start at (-5, 80) — 5px from container border, ~15px from child border
+                    points: vec![[0.0, 0.0], [555.0, 45.0]],
+                    start_binding: None,
+                    end_binding: Some(Binding { element_id: "target".into() }),
+                },
+            },
+        ];
+
+        let refs: Vec<&ExcalidrawElement> = elements.iter().collect();
+        let output = generate_mermaid(&refs);
+
+        // Should bind to container (larger area), not child
+        // container is a subgraph, so its id is used for the edge
+        assert!(output.contains("container --> target"), "expected binding to container, output was:\n{}", output);
+    }
+
+    #[test]
+    fn test_line_does_not_get_proximity_fallback() {
+        // Lines (decorative separators) should NOT get proximity fallback.
+        let elements = vec![
+            ExcalidrawElement {
+                id: "rect1".into(),
+                x: 0.0, y: 0.0, width: 200.0, height: 100.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Rectangle,
+            },
+            ExcalidrawElement {
+                id: "rect1_text".into(),
+                x: 10.0, y: 10.0, width: 50.0, height: 20.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Text {
+                    text: "Box".into(),
+                    original_text: "Box".into(),
+                    container_id: Some("rect1".into()),
+                },
+            },
+            // Decorative line near the rect — should stay dangling
+            ExcalidrawElement {
+                id: "line1".into(),
+                x: 5.0, y: 50.0, width: 190.0, height: 0.0,
+                is_deleted: false,
+                bound_elements: None,
+                element_data: ElementData::Line {
+                    points: vec![[0.0, 0.0], [190.0, 0.0]],
+                    start_binding: None,
+                    end_binding: None,
+                },
+            },
+        ];
+
+        let refs: Vec<&ExcalidrawElement> = elements.iter().collect();
+        let output = generate_mermaid(&refs);
+
+        // Line should remain dangling — no proximity resolution
+        assert!(output.contains("dangling"), "line should stay dangling, output was:\n{}", output);
+    }
+
+    #[test]
+    fn test_dist_to_nearest_edge() {
+        // Outside — to the left
+        assert!((dist_to_nearest_edge(-5.0, 50.0, 0.0, 0.0, 100.0, 100.0) - 5.0).abs() < 1e-9);
+        // Outside — diagonal (bottom-right corner)
+        let d = dist_to_nearest_edge(103.0, 104.0, 0.0, 0.0, 100.0, 100.0);
+        assert!((d - 5.0).abs() < 0.1, "expected ~5.0, got {}", d);
+        // Inside — closest edge is top (10px away)
+        assert!((dist_to_nearest_edge(50.0, 10.0, 0.0, 0.0, 100.0, 100.0) - 10.0).abs() < 1e-9);
+        // On the border
+        assert!((dist_to_nearest_edge(0.0, 50.0, 0.0, 0.0, 100.0, 100.0) - 0.0).abs() < 1e-9);
     }
 }
