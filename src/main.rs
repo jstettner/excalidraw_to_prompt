@@ -15,6 +15,10 @@ struct Args {
     /// Path to the excalidraw file
     #[arg(short, long)]
     path: PathBuf,
+
+    /// Hide edges with dangling (unresolved) bindings from output
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    hide_dangling: bool,
 }
 
 fn main() {
@@ -35,6 +39,6 @@ fn main() {
     };
 
     let elements: Vec<_> = file.elements.iter().filter(|e| !e.is_deleted).collect();
-    let output = mermaid::generate_mermaid(&elements);
+    let output = mermaid::generate_mermaid(&elements, args.hide_dangling);
     print!("{}", output);
 }

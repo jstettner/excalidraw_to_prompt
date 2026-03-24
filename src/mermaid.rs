@@ -4,7 +4,7 @@ use std::fmt::Write;
 use crate::hierarchy::{build_hierarchy, HierarchyNode};
 use crate::types::{ElementData, ExcalidrawElement};
 
-pub fn generate_mermaid(elements: &[&ExcalidrawElement]) -> String {
+pub fn generate_mermaid(elements: &[&ExcalidrawElement], hide_dangling: bool) -> String {
     // Build index: id -> element
     let index: HashMap<&str, &ExcalidrawElement> =
         elements.iter().map(|e| (e.id.as_str(), *e)).collect();
@@ -153,7 +153,7 @@ pub fn generate_mermaid(elements: &[&ExcalidrawElement]) -> String {
                 }
 
                 let label = edge_labels.get(el.id.as_str()).copied();
-                emit_edge(&mut out, &el.id, src, dst, "-->", label);
+                emit_edge(&mut out, &el.id, src, dst, "-->", label, hide_dangling);
             }
             ElementData::Line {
                 start_binding,
@@ -163,7 +163,7 @@ pub fn generate_mermaid(elements: &[&ExcalidrawElement]) -> String {
                 let src = start_binding.as_ref().and_then(|b| id_map.get(b.element_id.as_str()));
                 let dst = end_binding.as_ref().and_then(|b| id_map.get(b.element_id.as_str()));
                 let label = edge_labels.get(el.id.as_str()).copied();
-                emit_edge(&mut out, &el.id, src, dst, "---", label);
+                emit_edge(&mut out, &el.id, src, dst, "---", label, hide_dangling);
             }
             _ => {}
         }
@@ -227,19 +227,21 @@ fn find_nearest_node<'a>(
     best.map(|(id, _, _)| id)
 }
 
-fn emit_edge(out: &mut String, id: &str, src: Option<&String>, dst: Option<&String>, connector: &str, label: Option<&str>) {
+fn emit_edge(out: &mut String, id: &str, src: Option<&String>, dst: Option<&String>, connector: &str, label: Option<&str>, hide_dangling: bool) {
     match (src, dst) {
         (Some(s), Some(d)) => {
             match label {
                 Some(l) => writeln!(out, "    {} {}|\"{}\"| {}", s, connector, escape_mermaid_text(l), d),
                 None => writeln!(out, "    {} {} {}", s, connector, d),
             }
+            .unwrap();
         }
         _ => {
-            writeln!(out, "    %% edge {} has dangling binding", id)
+            if !hide_dangling {
+                writeln!(out, "    %% edge {} has dangling binding", id).unwrap();
+            }
         }
     }
-    .unwrap();
 }
 
 fn emit_node(
@@ -428,7 +430,7 @@ mod tests {
         ];
 
         let refs: Vec<&ExcalidrawElement> = elements.iter().collect();
-        let output = generate_mermaid(&refs);
+        let output = generate_mermaid(&refs, false);
 
         assert!(output.starts_with("flowchart TD\n"));
         assert!(output.contains("start[\"Start\"]"));
@@ -502,7 +504,7 @@ mod tests {
         ];
 
         let refs: Vec<&ExcalidrawElement> = elements.iter().collect();
-        let output = generate_mermaid(&refs);
+        let output = generate_mermaid(&refs, false);
 
         assert!(output.contains("a -->|\"proceed\"| b"), "output was: {}", output);
     }
@@ -551,7 +553,7 @@ mod tests {
         ];
 
         let refs: Vec<&ExcalidrawElement> = elements.iter().collect();
-        let output = generate_mermaid(&refs);
+        let output = generate_mermaid(&refs, false);
 
         assert!(output.contains("process[\"Process\"]"), "output was: {}", output);
         assert!(output.contains("process2[\"Process\"]"), "output was: {}", output);
@@ -603,7 +605,7 @@ mod tests {
         ];
 
         let refs: Vec<&ExcalidrawElement> = elements.iter().collect();
-        let output = generate_mermaid(&refs);
+        let output = generate_mermaid(&refs, false);
 
         assert!(output.contains("subgraph myGroup[\"My Group\"]"), "output was:\n{}", output);
         assert!(output.contains("child[\"Child\"]"), "output was:\n{}", output);
@@ -643,7 +645,7 @@ mod tests {
         ];
 
         let refs: Vec<&ExcalidrawElement> = elements.iter().collect();
-        let output = generate_mermaid(&refs);
+        let output = generate_mermaid(&refs, false);
 
         assert!(output.contains("subgraph sg_1[\" \"]"), "output was:\n{}", output);
         assert!(output.contains("leaf[\"Leaf\"]"), "output was:\n{}", output);
@@ -709,7 +711,7 @@ mod tests {
         ];
 
         let refs: Vec<&ExcalidrawElement> = elements.iter().collect();
-        let output = generate_mermaid(&refs);
+        let output = generate_mermaid(&refs, false);
 
         assert!(output.contains("subgraph outer[\"Outer\"]"), "output was:\n{}", output);
         assert!(output.contains("subgraph middle[\"Middle\"]"), "output was:\n{}", output);
@@ -795,7 +797,7 @@ mod tests {
         ];
 
         let refs: Vec<&ExcalidrawElement> = elements.iter().collect();
-        let output = generate_mermaid(&refs);
+        let output = generate_mermaid(&refs, false);
 
         assert!(output.contains("subgraph group[\"Group\"]"), "output was:\n{}", output);
         assert!(output.contains("a[\"A\"]"), "output was:\n{}", output);
@@ -858,7 +860,7 @@ mod tests {
         ];
 
         let refs: Vec<&ExcalidrawElement> = elements.iter().collect();
-        let output = generate_mermaid(&refs);
+        let output = generate_mermaid(&refs, false);
 
         // Should resolve the unbound start to "source" (the free-standing text)
         assert!(output.contains("source --> dest"), "expected proximity resolution, output was:\n{}", output);
@@ -946,7 +948,7 @@ mod tests {
         ];
 
         let refs: Vec<&ExcalidrawElement> = elements.iter().collect();
-        let output = generate_mermaid(&refs);
+        let output = generate_mermaid(&refs, false);
 
         // Should bind to container (larger area), not child
         // container is a subgraph, so its id is used for the edge
@@ -990,7 +992,7 @@ mod tests {
         ];
 
         let refs: Vec<&ExcalidrawElement> = elements.iter().collect();
-        let output = generate_mermaid(&refs);
+        let output = generate_mermaid(&refs, false);
 
         // Line should remain dangling — no proximity resolution
         assert!(output.contains("dangling"), "line should stay dangling, output was:\n{}", output);
@@ -1042,7 +1044,7 @@ mod tests {
         ];
 
         let refs: Vec<&ExcalidrawElement> = elements.iter().collect();
-        let output = generate_mermaid(&refs);
+        let output = generate_mermaid(&refs, false);
 
         // First node gets 3 words: goodMorningEveryone
         assert!(output.contains("goodMorningEveryone["), "output was: {}", output);
